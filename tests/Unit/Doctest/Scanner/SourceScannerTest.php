@@ -1,0 +1,217 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit\Doctest\Scanner;
+
+use function array_map;
+use function iterator_to_array;
+
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
+use PHPUnit\Framework\TestCase;
+use Toolkit\Doctest\Scanner\ParserFactoryBridge;
+use Toolkit\Doctest\Scanner\SourceScanner;
+use Toolkit\Doctest\Scanner\Target;
+use Toolkit\Doctest\Scanner\TargetKind;
+
+/**
+ * @covers \Toolkit\Doctest\Scanner\SourceScanner
+ * @uses \Toolkit\Doctest\Scanner\Target
+ * @uses \Toolkit\Doctest\Scanner\ParserFactoryBridge
+ */
+#[CoversClass(SourceScanner::class)]
+#[UsesClass(Target::class)]
+#[UsesClass(ParserFactoryBridge::class)]
+final class SourceScannerTest extends TestCase
+{
+    public function testScanFileFindsTheDocumentedClassAndItsMethods(): void
+    {
+        $path = (string) realpath(__DIR__ . '/../../../../tests/Doctest/project/src/Calculator.php');
+
+        $targets = iterator_to_array((new SourceScanner())->scanFile($path), false);
+
+        self::assertSame(
+            [
+                'Tests\Doctest\Project\Calculator',
+                'Tests\Doctest\Project\Calculator::add()',
+                'Tests\Doctest\Project\Calculator::divide()',
+                'Tests\Doctest\Project\Calculator::printSum()',
+                'Tests\Doctest\Project\Calculator::shape()',
+            ],
+            array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets),
+        );
+    }
+
+    public function testScanFileYieldsNothingForAMissingOrUnparsableFile(): void
+    {
+        $broken = sys_get_temp_dir() . '/doctest-source-scanner-broken.php';
+        file_put_contents($broken, "<?php\nclass {\n");
+
+        self::assertSame([], iterator_to_array((new SourceScanner())->scanFile('/does/not/exist.php'), false));
+        self::assertSame([], iterator_to_array((new SourceScanner())->scanFile($broken), false));
+    }
+
+    public function testScanFileYieldsNothingForAFileThatOnlyPartlyParses(): void
+    {
+        $path = sys_get_temp_dir() . '/doctest-source-scanner-partly-broken.php';
+        file_put_contents($path, "<?php\nnamespace Probe;\n/** Class docs. */\nclass Widget {}\n\$first = 1\n\$second = 2;\n");
+
+        self::assertSame([], iterator_to_array((new SourceScanner())->scanFile($path), false));
+    }
+
+    public function testScanFileReportsAFileLevelDocblockFirst(): void
+    {
+        $path = sys_get_temp_dir() . '/doctest-source-scanner-file-doc.php';
+        file_put_contents($path, "<?php\n\ndeclare(strict_types=1);\n\n/**\n * File docs.\n */\n\n/** Fn docs. */\nfunction doctestScannerHelper(): void\n{\n}\n");
+
+        $targets = iterator_to_array((new SourceScanner())->scanFile($path), false);
+
+        self::assertCount(2, $targets);
+        self::assertSame(TargetKind::FILE, $targets[0]->type);
+        self::assertSame("/**\n * File docs.\n */", $targets[0]->docblock);
+        self::assertSame(1, $targets[0]->line);
+        self::assertSame(TargetKind::FUNCTION, $targets[1]->type);
+        self::assertSame('doctestScannerHelper', $targets[1]->name);
+    }
+
+    public function testExtractFileDocblockSkipsAStrictTypesDeclaration(): void
+    {
+        $scanner = new SourceScanner();
+
+        self::assertSame('/** Docs. */', $scanner->extractFileDocblock("<?php\ndeclare(strict_types=1);\n/** Docs. */\nclass A {}"));
+        self::assertSame('/** Docs. */', $scanner->extractFileDocblock("<?php\n/** Docs. */\nclass A {}"));
+        self::assertNull($scanner->extractFileDocblock("<?php\nclass A {}"));
+    }
+
+    public function testTraverseAstFindsDeclarationsNestedInsideControlFlow(): void
+    {
+        $path = sys_get_temp_dir() . '/doctest-source-scanner-nested.php';
+        file_put_contents($path, "<?php\nnamespace Probe;\nif (true) {\n    /** Nested docs. */\n    function doctestNested(): void {}\n}\n");
+
+        $targets = iterator_to_array((new SourceScanner())->scanFile($path), false);
+
+        self::assertSame(['Probe\doctestNested()'], array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets));
+    }
+
+    public function testTargetsOfSkipsAnonymousClassesAndUndocumentedDeclarations(): void
+    {
+        $path = sys_get_temp_dir() . '/doctest-source-scanner-anonymous.php';
+        file_put_contents($path, "<?php\n\$thing = new class {\n    public function run(): void {}\n};\nclass Undocumented {}\n");
+
+        self::assertSame([], iterator_to_array((new SourceScanner())->scanFile($path), false));
+    }
+
+    public function testClassTargetsReportsTheClassBeforeItsMethods(): void
+    {
+        $path = sys_get_temp_dir() . '/doctest-source-scanner-class.php';
+        file_put_contents($path, "<?php\nnamespace Probe;\n/** Class docs. */\nclass Widget {\n    /** Method docs. */\n    public static function run(): void {}\n}\n");
+
+        $targets = iterator_to_array((new SourceScanner())->scanFile($path), false);
+
+        self::assertSame(['Probe\Widget', 'Probe\Widget::run()'], array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets));
+        self::assertTrue($targets[1]->isStatic);
+    }
+
+    public function testTraverseAstPassesOverAnythingThatIsNotANode(): void
+    {
+        $scanner = new SourceScanner();
+        $documented = new \PhpParser\Node\Stmt\Function_('helper', [], ['comments' => [new \PhpParser\Comment\Doc('/** Docs. */')]]);
+
+        $targets = iterator_to_array($scanner->traverseAst(['not a node', null, $documented], '/a.php', 'Probe', null), false);
+
+        self::assertCount(1, $targets);
+        self::assertSame('Probe\helper()', $targets[0]->getFullyQualifiedName());
+    }
+
+    public function testTargetsOfReportsAClassOnceAndDoesNotWalkItTwice(): void
+    {
+        $scanner = new SourceScanner();
+        $method = new \PhpParser\Node\Stmt\ClassMethod('run', [], ['comments' => [new \PhpParser\Comment\Doc('/** Method docs. */')]]);
+        $class = new \PhpParser\Node\Stmt\Class_('Widget', ['stmts' => [$method]], ['comments' => [new \PhpParser\Comment\Doc('/** Class docs. */')]]);
+
+        $targets = iterator_to_array($scanner->targetsOf($class, '/a.php', 'Probe', 'Outer'), false);
+
+        self::assertSame(
+            ['Probe\Widget', 'Probe\Widget::run()'],
+            array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets),
+        );
+    }
+
+    public function testTargetsOfDoesNotDescendIntoTheBodyOfAMethod(): void
+    {
+        $scanner = new SourceScanner();
+        $nested = new \PhpParser\Node\Stmt\Function_('nested', [], ['comments' => [new \PhpParser\Comment\Doc('/** Nested docs. */')]]);
+        $method = new \PhpParser\Node\Stmt\ClassMethod('run', ['stmts' => [$nested]], ['comments' => [new \PhpParser\Comment\Doc('/** Method docs. */')]]);
+
+        $targets = iterator_to_array($scanner->targetsOf($method, '/a.php', 'Probe', 'Widget'), false);
+
+        self::assertSame(
+            ['Probe\Widget::run()'],
+            array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets),
+        );
+    }
+
+    public function testTargetsOfDoesNotDescendIntoTheBodyOfAFunction(): void
+    {
+        $scanner = new SourceScanner();
+        $nested = new \PhpParser\Node\Stmt\Function_('nested', [], ['comments' => [new \PhpParser\Comment\Doc('/** Nested docs. */')]]);
+        $function = new \PhpParser\Node\Stmt\Function_('outer', ['stmts' => [$nested]], ['comments' => [new \PhpParser\Comment\Doc('/** Outer docs. */')]]);
+
+        $targets = iterator_to_array($scanner->targetsOf($function, '/a.php', 'Probe', null), false);
+
+        self::assertSame(
+            ['Probe\outer()'],
+            array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets),
+        );
+    }
+
+    public function testClassTargetsReportsOnlyTheMembersOfAnUndocumentedClass(): void
+    {
+        $scanner = new SourceScanner();
+        $method = new \PhpParser\Node\Stmt\ClassMethod('run', [], ['comments' => [new \PhpParser\Comment\Doc('/** Method docs. */')]]);
+        $class = new \PhpParser\Node\Stmt\Class_('Widget', ['stmts' => [$method]]);
+
+        $targets = iterator_to_array($scanner->classTargets($class, '/a.php', 'Probe'), false);
+
+        self::assertSame(
+            ['Probe\Widget::run()'],
+            array_map(static fn (Target $target): string => $target->getFullyQualifiedName(), $targets),
+        );
+    }
+
+    public function testClassTargetsSkipsADocumentedAnonymousClass(): void
+    {
+        $scanner = new SourceScanner();
+        $class = new \PhpParser\Node\Stmt\Class_(null, [], ['comments' => [new \PhpParser\Comment\Doc('/** Class docs. */')]]);
+
+        self::assertSame([], iterator_to_array($scanner->classTargets($class, '/a.php', 'Probe'), false));
+    }
+
+    public function testMethodTargetIsSkippedOutsideAClass(): void
+    {
+        $scanner = new SourceScanner();
+        $method = new \PhpParser\Node\Stmt\ClassMethod('run', [], ['comments' => [new \PhpParser\Comment\Doc('/** Docs. */')]]);
+
+        self::assertSame([], iterator_to_array($scanner->methodTarget($method, '/a.php', null, null), false));
+        self::assertSame([], iterator_to_array($scanner->methodTarget(new \PhpParser\Node\Stmt\ClassMethod('run'), '/a.php', null, 'Widget'), false));
+    }
+
+    public function testFunctionTargetIsSkippedWithoutADocblock(): void
+    {
+        $scanner = new SourceScanner();
+        $function = new \PhpParser\Node\Stmt\Function_('helper');
+
+        self::assertSame([], iterator_to_array($scanner->functionTarget($function, '/a.php', null), false));
+    }
+
+    public function testChildrenReturnsTheNodeSubNodes(): void
+    {
+        $scanner = new SourceScanner();
+        $class = new \PhpParser\Node\Stmt\Class_('Widget', ['stmts' => [new \PhpParser\Node\Stmt\ClassMethod('run')]]);
+
+        $children = $scanner->children($class);
+
+        self::assertSame([$class->name, $class->stmts[0]], $children);
+    }
+}

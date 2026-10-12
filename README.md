@@ -1,186 +1,107 @@
 # doctest-php
 
-PHPUnit extension for testing examples in PHP docblocks.
+> Read-only mirror of [php-ai-toolkit](https://github.com/k-kinzal/php-ai-toolkit).
+> Submit changes and issues to the monorepo.
 
-Like Python's doctest or Rust's doc tests, doctest-php automatically extracts and runs code examples from your documentation.
+[![PHP](https://img.shields.io/badge/php-8.0%2B-777bb4?logo=php&logoColor=white)](https://www.php.net/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## Installation
+Run PHPDoc examples as PHPUnit tests and report examples that no longer match
+the code they document.
 
-```bash
-composer require --dev doctest/doctest-php
+## Requirements
+
+- PHP 8.0 or later
+- PHPUnit 9.6, 10.5 or later on 10.x, and 11, 12, and 13
+
+## Getting Started
+
+```console
+$ composer require --dev k-kinzal/doctest-php
 ```
 
-## Quick Start
-
-Add the following to your `phpunit.xml`:
+Install a compatible PHPUnit release if your project does not already require one.
+For PHPUnit 10.5 or later, add the suite and extension to your `phpunit.xml.dist`:
 
 ```xml
-<phpunit>
-    <testsuites>
-        <!-- Your existing test suites -->
-        <testsuite name="Unit">
-            <directory>tests</directory>
-        </testsuite>
-
-        <!-- Add doctest suite -->
-        <testsuite name="Doctest">
-            <file>vendor/doctest/doctest-php/DoctestSuite.php</file>
-        </testsuite>
-    </testsuites>
-
-    <!-- Configure the extension -->
-    <extensions>
-        <bootstrap class="Doctest\DoctestExtension">
-            <parameter name="directories" value="src"/>
-        </bootstrap>
-    </extensions>
-</phpunit>
-```
-
-Write examples in your docblocks:
-
-```php
-<?php
-
-/**
- * Add two numbers.
- *
- * ```php
- * add(1, 2) // => 3
- * add(-1, 1) // => 0
- * ```
- */
-function add(int $a, int $b): int
-{
-    return $a + $b;
-}
-```
-
-Run PHPUnit:
-
-```bash
-./vendor/bin/phpunit
-```
-
-That's it! No test files to create - doctests are automatically discovered and executed.
-
-## Supported Assertion Formats
-
-### Return Value Assertion (`// => expected`)
-
-```php
-/**
- * @example
- * add(1, 2) // => 3
- * subtract(5, 3) // => 2
- */
-```
-
-### Output Assertion (`// Output: expected`)
-
-```php
-/**
- * @example
- * echo greet("World"); // Output: Hello, World!
- */
-```
-
-### Exception Assertion (`// throws ExceptionClass`)
-
-```php
-/**
- * @example
- * divide(10, 0) // throws DivisionByZeroError
- *
- * @example With message check
- * divide(10, 0) // throws DivisionByZeroError: Cannot divide by zero
- */
-```
-
-### Smoke Test (No Assertion)
-
-Code without assertions is treated as a smoke test - it passes if no exception is thrown:
-
-```php
-/**
- * @example
- * $repo = new UserRepository();
- * $name = $repo->findNameById(10);
- * echo $name;
- */
-```
-
-## Example Formats
-
-### @example Tag
-
-```php
-/**
- * @example Basic usage
- * $calc = new Calculator();
- * $calc->add(1, 2) // => 3
- *
- * @example With negative numbers
- * $calc = new Calculator();
- * $calc->add(-5, 3) // => -2
- */
-```
-
-### Code Fence (```php)
-
-````php
-/**
- * Calculate the sum.
- *
- * ```php
- * $calc = new Calculator();
- * $calc->add(5, 3) // => 8
- * ```
- */
-````
-
-## Multi-line Examples with State
-
-Variables persist within a single example block:
-
-```php
-/**
- * @example
- * $stack = new Stack();
- * $stack->push(1);
- * $stack->push(2);
- * $stack->pop() // => 2
- * $stack->pop() // => 1
- */
-```
-
-## Configuration Options
-
-Configure via extension parameters in `phpunit.xml`:
-
-```xml
+<testsuites>
+    <testsuite name="doctest">
+        <file>vendor/k-kinzal/doctest-php/src/Doctest/DoctestSuite.php</file>
+    </testsuite>
+</testsuites>
 <extensions>
-    <bootstrap class="Doctest\DoctestExtension">
-        <parameter name="directories" value="src,lib"/>
-        <parameter name="files" value="functions.php,helpers.php"/>
-        <parameter name="exclude" value="**/vendor/**,**/tests/**"/>
-        <parameter name="bootstrap" value="tests/bootstrap.php"/>
+    <bootstrap class="Toolkit\Doctest\DoctestExtension">
+        <parameter name="directories" value="src"/>
     </bootstrap>
 </extensions>
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `directories` | Comma-separated list of directories to scan |
-| `files` | Comma-separated list of specific files to scan |
-| `exclude` | Comma-separated glob patterns to exclude |
-| `bootstrap` | Bootstrap file to load before running doctests |
+Merge these entries with your existing suites and extensions. Keep
+`bootstrap="vendor/autoload.php"` on the `phpunit` element so examples can load
+your project's classes.
 
-## Requirements
+Add a runnable `@example` to a PHPDoc block in `src/`:
 
-- PHP 8.1+
-- PHPUnit 10.0+ or 11.0+
+```php
+/**
+ * @example Adding two values
+ *     \App\Calculator::add(2, 3) // => 5
+ */
+```
+
+The example calls the documented code, so `App\Calculator::add()` must exist
+and be autoloadable. Run the examples with PHPUnit:
+
+```console
+$ vendor/bin/phpunit --testsuite doctest
+```
+
+Each example becomes a test. A failed assertion reports the source file, example,
+and line so you can update the code or correct the example.
+
+### Example notation
+
+Doctest reads multiline `@example` blocks and PHP fenced blocks inside PHPDoc.
+Use fully qualified class names; examples do not inherit the source file's imports.
+
+| Notation | Check |
+| --- | --- |
+| `expression // => value` | The expression returns the expected value. |
+| `echo 'hello'; // Output: hello` | The statement writes the expected output. |
+| `throw new \RuntimeException(); // throws RuntimeException` | The statement throws the expected exception. |
+| `throw new \RuntimeException('failed'); // throws RuntimeException: failed` | The exception also has the expected message. |
+
+Lines without an assertion still run and fail if they raise an unexpected exception.
+Variables remain available to later lines in the same example. A single-line
+`@example` is display-only and does not create a test.
+
+### Configuration
+
+The extension accepts `directories`, `files`, `exclude`, `bootstrap`, and `enabled`
+parameters. `directories` and `files` are comma-separated paths relative to the
+PHPUnit configuration file. `exclude` accepts comma-separated glob patterns.
+`bootstrap` loads an additional file before running examples, and `enabled=false`
+disables the suite. Select the directories or files to scan; neither is set by default.
+
+### PHPUnit 9.6
+
+Use the legacy suite and environment settings in `phpunit.xml.dist`:
+
+```xml
+<testsuites>
+    <testsuite name="doctest">
+        <file>vendor/k-kinzal/doctest-php/src/Doctest/Legacy/LegacyDoctestSuite.php</file>
+    </testsuite>
+</testsuites>
+<php>
+    <env name="DOCTEST_DIRECTORIES" value="src"/>
+</php>
+```
+
+The same options are available as `DOCTEST_DIRECTORIES`, `DOCTEST_FILES`,
+`DOCTEST_EXCLUDE`, `DOCTEST_BOOTSTRAP`, and `DOCTEST_ENABLED`. Run the same
+`vendor/bin/phpunit --testsuite doctest` command.
 
 ## License
 
-MIT
+[MIT](LICENSE)

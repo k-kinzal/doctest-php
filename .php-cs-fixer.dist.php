@@ -2,19 +2,38 @@
 
 declare(strict_types=1);
 
-$finder = PhpCsFixer\Finder::create()
-    ->in(__DIR__ . '/src')
-    ->in(__DIR__ . '/tests');
+$finder = (new PhpCsFixer\Finder())
+    ->in(__DIR__)
+    ->exclude('build')
+    ->exclude('node_modules')
+    ->exclude('tests/Doctest')
+    ->notPath('tests/run.php')
+    ->exclude('var')
+    ->exclude('vendor');
 
 return (new PhpCsFixer\Config())
+    ->setRiskyAllowed(true)
     ->setRules([
-        '@PER-CS2.0' => true,
-        '@PHP81Migration' => true,
+        '@PSR12' => true,
+        'declare_strict_types' => true,
+        'strict_param' => true,
+        'strict_comparison' => true,
         'array_syntax' => ['syntax' => 'short'],
         'no_unused_imports' => true,
         'ordered_imports' => ['sort_algorithm' => 'alpha'],
         'single_quote' => true,
         'trailing_comma_in_multiline' => true,
+        'no_empty_statement' => true,
+        'no_superfluous_elseif' => true,
+        'no_useless_else' => true,
+        'void_return' => true,
+        'no_alias_functions' => true,
+        'no_mixed_echo_print' => ['use' => 'echo'],
+        'global_namespace_import' => [
+            'import_classes' => true,
+            'import_constants' => true,
+            'import_functions' => true,
+        ],
+        'fully_qualified_strict_types' => true,
     ])
-    ->setFinder($finder)
-    ->setRiskyAllowed(true);
+    ->setFinder($finder);

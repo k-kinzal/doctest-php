@@ -1,0 +1,229 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit\Doctest\Executor;
+
+use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Medium;
+use PHPUnit\Framework\Attributes\UsesClass;
+use PHPUnit\Framework\TestCase;
+use RuntimeException;
+use Toolkit\Doctest\Assertion\Assertion;
+use Toolkit\Doctest\Assertion\AssertionKind;
+use Toolkit\Doctest\Assertion\AssertionParser;
+use Toolkit\Doctest\Assertion\AssertionResult;
+use Toolkit\Doctest\Assertion\ParsedExample;
+use Toolkit\Doctest\Assertion\Statement;
+use Toolkit\Doctest\Executor\Evaluation;
+use Toolkit\Doctest\Executor\ExampleExecutor;
+use Toolkit\Doctest\Executor\ExceptionMatcher;
+use Toolkit\Doctest\Executor\ExecutionContext;
+use Toolkit\Doctest\Executor\ExecutionResult;
+use Toolkit\Doctest\Executor\ExpressionEvaluator;
+use Toolkit\Doctest\Parser\Example;
+use Toolkit\Doctest\Scanner\Target;
+use Toolkit\Doctest\Scanner\TargetKind;
+
+/**
+ * @covers \Toolkit\Doctest\Executor\ExampleExecutor
+ * @uses \Toolkit\Doctest\Parser\Example
+ * @uses \Toolkit\Doctest\Scanner\Target
+ * @uses \Toolkit\Doctest\Assertion\Statement
+ * @uses \Toolkit\Doctest\Assertion\Assertion
+ * @uses \Toolkit\Doctest\Assertion\AssertionParser
+ * @uses \Toolkit\Doctest\Assertion\AssertionResult
+ * @uses \Toolkit\Doctest\Assertion\ParsedExample
+ * @uses \Toolkit\Doctest\Executor\ExecutionResult
+ * @uses \Toolkit\Doctest\Executor\ExecutionContext
+ * @uses \Toolkit\Doctest\Executor\ExpressionEvaluator
+ * @uses \Toolkit\Doctest\Executor\Evaluation
+ * @uses \Toolkit\Doctest\Executor\ExceptionMatcher
+ * @medium
+ */
+#[CoversClass(ExampleExecutor::class)]
+#[UsesClass(Example::class)]
+#[UsesClass(Target::class)]
+#[UsesClass(Statement::class)]
+#[UsesClass(Assertion::class)]
+#[UsesClass(AssertionParser::class)]
+#[UsesClass(AssertionResult::class)]
+#[UsesClass(ParsedExample::class)]
+#[UsesClass(ExecutionResult::class)]
+#[UsesClass(ExecutionContext::class)]
+#[UsesClass(ExpressionEvaluator::class)]
+#[UsesClass(Evaluation::class)]
+#[UsesClass(ExceptionMatcher::class)]
+#[Medium]
+final class ExampleExecutorTest extends TestCase
+{
+    public function testExecuteRunsAnExampleWhoseAssertionsHold(): void
+    {
+        $path = (string) realpath(__DIR__ . '/../../../../tests/Doctest/project/src/Calculator.php');
+        $target = new Target(TargetKind::CLASS_LIKE, $path, '/** */', 'Calculator', 12, 'Tests\Doctest\Project');
+        $code = "\$calculator = new \\Tests\\Doctest\\Project\\Calculator();\n\$calculator->add(1, 2) // => 3";
+
+        $result = (new ExampleExecutor())->execute(new Example($code, $target, 14, 0));
+
+        self::assertTrue($result->passed);
+    }
+
+    public function testExecuteReportsAnExampleThatDocumentsTheWrongValue(): void
+    {
+        $path = (string) realpath(__DIR__ . '/../../../../tests/Doctest/project/src/Calculator.php');
+        $target = new Target(TargetKind::CLASS_LIKE, $path, '/** */', 'Calculator', 12, 'Tests\Doctest\Project');
+
+        $result = (new ExampleExecutor())->execute(new Example('(new \\Tests\\Doctest\\Project\\Calculator())->add(1, 2) // => 4', $target, 14, 0));
+
+        self::assertFalse($result->passed);
+        self::assertStringContainsString('Values do not match', $result->getErrorMessage());
+    }
+
+    public function testExecuteParsedRunsEveryStatementAndCollectsFailures(): void
+    {
+        $path = (string) realpath(__DIR__ . '/../../../../tests/Doctest/project/src/Calculator.php');
+        $target = new Target(TargetKind::CLASS_LIKE, $path, '/** */', 'Calculator', 12);
+        $example = new Example('x', $target, 14, 0);
+        $parsed = new ParsedExample($example, [
+            new Statement('1 + 1', new Assertion(AssertionKind::RETURN_VALUE, '3'), 1),
+            new Statement('1 + 1', new Assertion(AssertionKind::RETURN_VALUE, '2'), 2),
+        ]);
+
+        $result = (new ExampleExecutor())->executeParsed($parsed);
+
+        self::assertFalse($result->passed);
+        self::assertCount(1, $result->failures);
+    }
+
+    public function testLoadSourcesRequiresTheBootstrapAndTheTargetOnce(): void
+    {
+        $bootstrap = sys_get_temp_dir() . '/doctest-executor-bootstrap.php';
+        file_put_contents($bootstrap, "<?php\n\$GLOBALS['doctestExecutorBootstrapCount'] = (\$GLOBALS['doctestExecutorBootstrapCount'] ?? 0) + 1;\n");
+        $target = sys_get_temp_dir() . '/doctest-executor-target.php';
+        file_put_contents($target, "<?php\n\$GLOBALS['doctestExecutorTargetCount'] = (\$GLOBALS['doctestExecutorTargetCount'] ?? 0) + 1;\n");
+        $executor = new ExampleExecutor($bootstrap);
+
+        $executor->loadSources($target);
+        $executor->loadSources($target);
+
+        self::assertSame(1, $GLOBALS['doctestExecutorBootstrapCount']);
+        self::assertSame(1, $GLOBALS['doctestExecutorTargetCount']);
+    }
+
+    public function testExecuteStatementReportsAnUnexpectedException(): void
+    {
+        $statement = new Statement('throw new \RuntimeException("bad");', null, 1);
+
+        $result = (new ExampleExecutor())->executeStatement($statement, new ExecutionContext());
+
+        self::assertFalse($result->passed);
+        self::assertSame('Unexpected exception RuntimeException: bad', $result->message);
+    }
+
+    public function testUnexpectedExceptionNamesWhatTheStatementRaised(): void
+    {
+        $executor = new ExampleExecutor();
+        $statement = new Statement('boom()', null, 1);
+
+        $reported = $executor->unexpectedException($statement, new RuntimeException('bad'));
+
+        self::assertFalse($reported->passed);
+        self::assertSame('Unexpected exception RuntimeException: bad', $reported->message);
+        self::assertTrue($executor->unexpectedException($statement, null)->passed);
+    }
+
+    public function testExecuteStatementPassesASmokeStatement(): void
+    {
+        $result = (new ExampleExecutor())->executeStatement(new Statement('$sum = 1;', null, 1), new ExecutionContext());
+
+        self::assertTrue($result->passed);
+    }
+
+    public function testExecuteWithExpectedExceptionReportsAStatementThatCompletes(): void
+    {
+        $statement = new Statement('1 + 1', new Assertion(AssertionKind::EXCEPTION, 'RuntimeException'), 1);
+
+        $result = (new ExampleExecutor())->executeWithExpectedException($statement, new ExecutionContext());
+
+        self::assertFalse($result->passed);
+        self::assertSame('Expected exception RuntimeException but none was thrown', $result->message);
+    }
+
+    public function testExecuteWithExpectedExceptionAcceptsTheDocumentedException(): void
+    {
+        $statement = new Statement('throw new \InvalidArgumentException("Cannot divide by zero");', new Assertion(AssertionKind::EXCEPTION, 'InvalidArgumentException', 'divide by zero'), 1);
+
+        $result = (new ExampleExecutor())->executeWithExpectedException($statement, new ExecutionContext());
+
+        self::assertTrue($result->passed);
+    }
+
+    public function testCheckThrownExceptionReportsTheWrongClassAndTheWrongMessage(): void
+    {
+        $executor = new ExampleExecutor();
+        $statement = new Statement('boom()', null, 1);
+
+        $wrongClass = $executor->checkThrownException($statement, new RuntimeException('bad'), 'InvalidArgumentException', null);
+        $wrongMessage = $executor->checkThrownException($statement, new InvalidArgumentException('bad'), 'InvalidArgumentException', 'overflow');
+
+        self::assertFalse($wrongClass->passed);
+        self::assertStringContainsString('but got RuntimeException', $wrongClass->message);
+        self::assertFalse($wrongMessage->passed);
+        self::assertStringContainsString('does not contain "overflow"', $wrongMessage->message);
+    }
+
+    public function testCheckThrownExceptionAcceptsAnExceptionTheExampleDocumentsNoMessageFor(): void
+    {
+        $executor = new ExampleExecutor();
+        $statement = new Statement('boom()', null, 1);
+
+        self::assertTrue($executor->checkThrownException($statement, new RuntimeException('bad'), 'RuntimeException', null)->passed);
+        self::assertTrue($executor->checkThrownException($statement, new RuntimeException('bad'), 'RuntimeException', 'bad')->passed);
+    }
+
+    public function testCheckAssertionRoutesOutputAndReturnValueAssertions(): void
+    {
+        $executor = new ExampleExecutor();
+        $context = new ExecutionContext();
+        $context->lastOutput = 'Hello';
+
+        $output = $executor->checkAssertion(new Statement('echo "Hello";', new Assertion(AssertionKind::OUTPUT, 'Hello'), 1), null, $context);
+        $returned = $executor->checkAssertion(new Statement('1 + 1', new Assertion(AssertionKind::RETURN_VALUE, '2'), 1), 2, $context);
+
+        self::assertTrue($output->passed);
+        self::assertTrue($returned->passed);
+    }
+
+    public function testCheckReturnValueReportsAnUnparsableExpectedValue(): void
+    {
+        $statement = new Statement('run()', new Assertion(AssertionKind::RETURN_VALUE, 'not php +'), 1);
+
+        $result = (new ExampleExecutor())->checkReturnValue($statement, null);
+
+        self::assertFalse($result->passed);
+        self::assertStringContainsString('Failed to parse expected value', $result->message);
+    }
+
+    public function testCheckOutputAcceptsAnExactMatchOrOneTrailingNewline(): void
+    {
+        $executor = new ExampleExecutor();
+        $statement = new Statement('echo "hi";', new Assertion(AssertionKind::OUTPUT, 'hi'), 1);
+
+        self::assertTrue($executor->checkOutput($statement, 'hi')->passed);
+        self::assertTrue($executor->checkOutput($statement, "hi\n")->passed);
+        self::assertFalse($executor->checkOutput($statement, 'bye')->passed);
+    }
+
+    public function testEveryCheckPassesAStatementThatAssertsNothing(): void
+    {
+        $executor = new ExampleExecutor();
+        $statement = new Statement('1 + 1', null, 1);
+        $context = new ExecutionContext();
+
+        self::assertTrue($executor->executeWithExpectedException($statement, $context)->passed);
+        self::assertTrue($executor->checkAssertion($statement, 2, $context)->passed);
+        self::assertTrue($executor->checkReturnValue($statement, 2)->passed);
+        self::assertTrue($executor->checkOutput($statement, 'anything')->passed);
+    }
+}
